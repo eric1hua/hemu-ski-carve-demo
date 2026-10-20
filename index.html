@@ -59,7 +59,6 @@ const [meta, hb, ha, runs] = await Promise.all([
 ]);
 const { size, cells } = meta, V = cells + 1, step = size / cells;
 const x0 = meta.center[0] - size / 2, z0 = meta.center[1] - size / 2;
-const H = i => i; // placeholder
 
 function heightAt(arr, x, z) {
   let fx = (x - x0) / step, fz = (z - z0) / step;
@@ -97,10 +96,17 @@ geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 const cSnow = new THREE.Color('#eef2f6'), cSteep = new THREE.Color('#9aa7b8'),
       cGroom = new THREE.Color('#cfe3f2'), tmp = new THREE.Color();
 
-function paintTerrain(t) {
+let shadeTimer = null;
+function paintTerrain(t, full = true) {
   for (let k = 0; k < pos.count; k++)
     pos.setY(k, hb[k] * (1 - t) + ha[k] * t);
   pos.needsUpdate = true;
+  if (!full) { // positions only during animation; normals/colors catch up debounced
+    clearTimeout(shadeTimer);
+    shadeTimer = setTimeout(() => paintTerrain(t, true), 140);
+    return;
+  }
+  clearTimeout(shadeTimer);
   geo.computeVertexNormals();
   const nrm = geo.attributes.normal;
   for (let k = 0; k < pos.count; k++) {
@@ -142,7 +148,7 @@ drapeLines(1);
 let morphT = 1, morphAnim = null;
 function setMorph(t) {
   morphT = t; $('morph').value = Math.round(t * 100);
-  paintTerrain(t); drapeLines(t);
+  paintTerrain(t, false); drapeLines(t);
 }
 $('morph').addEventListener('input', e => { stopFly(); setMorph(e.target.value / 100); });
 $('play').addEventListener('click', () => {
@@ -151,8 +157,10 @@ $('play').addEventListener('click', () => {
   cancelAnimationFrame(morphAnim);
   const stepFn = now => {
     const k = Math.min(1, (now - t0) / 1600), e = k*k*(3-2*k);
-    setMorph(from + (to - from) * e);
+    morphT = from + (to - from) * e; $('morph').value = Math.round(morphT * 100);
+    paintTerrain(morphT, false); drapeLines(morphT);
     if (k < 1) morphAnim = requestAnimationFrame(stepFn);
+    else paintTerrain(morphT, true);
   };
   morphAnim = requestAnimationFrame(stepFn);
 });
