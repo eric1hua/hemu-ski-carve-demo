@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>雪道整平 piste carving · 效果演示</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0e1420;font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  #app{position:fixed;inset:0}
+  .panel{position:fixed;top:14px;left:14px;background:rgba(10,16,28,.78);backdrop-filter:blur(8px);
+    color:#e8eef6;border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:14px 16px;max-width:320px}
+  .panel h1{font-size:15px;margin:0 0 4px;font-weight:600}
+  .panel p{font-size:12px;line-height:1.6;color:#aeb9c9;margin:6px 0}
+  .row{display:flex;align-items:center;gap:8px;margin:10px 0 4px}
+  .row label{font-size:12px;color:#cfd8e6;white-space:nowrap}
+  input[type=range]{flex:1;accent-color:#e74c3c}
+  .btns{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+  button{background:#1d2a44;color:#e8eef6;border:1px solid rgba(255,255,255,.16);border-radius:8px;
+    padding:7px 12px;font-size:12px;cursor:pointer}
+  button:hover{background:#274067}
+  button.active{background:#e74c3c;border-color:#e74c3c}
+  .stats{font-size:11px;color:#8b96a9;margin-top:8px;line-height:1.7}
+  .hint{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);color:#93a0b4;font-size:12px;
+    background:rgba(10,16,28,.6);padding:6px 14px;border-radius:20px;pointer-events:none}
+  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#cfd8e6;font-size:14px}
+</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+</head>
+<body>
+<div id="loading">正在加载地形数据…</div>
+<div id="app"></div>
+<div class="panel" id="panel" style="display:none">
+  <h1>⛷️ 雪道整平 · piste carving</h1>
+  <p>把 OSM 雪道中心线加密 → 取横向走廊平均高程 → 沿线平滑成设计纵断面 → 把地形向雪道台地贴合。拖动滑杆看台地形成过程。</p>
+  <div class="row"><label>整平前</label><input id="morph" type="range" min="0" max="100" value="100"><label>整平后</label></div>
+  <div class="btns">
+    <button id="play">▶ 播放过渡</button>
+    <button id="fly">🎿 飞行：柳兰道</button>
+    <button id="reset">重置视角</button>
+  </div>
+  <div class="stats">36 条雪道 · 7.5% 顶点被整平 · 挖填各 0.5Mm³<br>横向坡度 −21% · 台地半宽 6m（羽化至 18m）</div>
+</div>
+<div class="hint" id="hint" style="display:none">左键旋转 · 右键平移 · 滚轮缩放</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const $ = id => document.getElementById(id);
+const loadBin = async u => new Float32Array(await (await fetch(u)).arrayBuffer());
+
+const [meta, hb, ha, runs] = await Promise.all([
+  fetch('meta.json').then(r => r.json()),
+  loadBin('heights_before.bin'), loadBin('heights_after.bin'),
+  fetch('pistes.json').then(r => r.json()),
+]);
+const { size, cells } = meta, V = cells + 1, step = size / cells;
+const x0 = meta.center[0] - size / 2, z0 = meta.center[1] - size / 2;
+const H = i => i; // placeholder
+
+function heightAt(arr, x, z) {
+  let fx = (x - x0) / step, fz = (z - z0) / step;
+  fx = Math.min(Math.max(fx, 0), cells - 1e-6); fz = Math.min(Math.max(fz, 0), cells - 1e-6);
+  const i = Math.floor(fx), j = Math.floor(fz), ax = fx - i, az = fz - j, k = j * V + i;
+  return (arr[k]*(1-ax)+arr[k+1]*ax)*(1-az) + (arr[k+V]*(1-ax)+arr[k+V+1]*ax)*az;
+}
+const mixH = (x, z, t) => heightAt(hb, x, z) * (1 - t) + heightAt(ha, x, z) * t;
+
+// ---------- scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+$('app').appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#0e1420');
+scene.fog = new THREE.Fog('#0e1420', 5000, 14000);
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 1, 40000);
+const CAM0 = new THREE.Vector3(2600, 2600, 3400);
+camera.position.copy(CAM0);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(300, 2000, 200);
+controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.49;
+
+scene.add(new THREE.HemisphereLight('#cdd8e8', '#1a2233', 0.9));
+const sun = new THREE.DirectionalLight('#ffffff', 1.6);
+sun.position.set(-3000, 4200, -1800); scene.add(sun);
+
+// ---------- terrain ----------
+const geo = new THREE.PlaneGeometry(size, size, cells, cells);
+geo.rotateX(-Math.PI / 2); // j=0 -> north edge, matches grid rows
+const pos = geo.attributes.position;
+const colors = new Float32Array(pos.count * 3);
+geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+const cSnow = new THREE.Color('#eef2f6'), cSteep = new THREE.Color('#9aa7b8'),
+      cGroom = new THREE.Color('#cfe3f2'), tmp = new THREE.Color();
+
+function paintTerrain(t) {
+  for (let k = 0; k < pos.count; k++)
+    pos.setY(k, hb[k] * (1 - t) + ha[k] * t);
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  const nrm = geo.attributes.normal;
+  for (let k = 0; k < pos.count; k++) {
+    const ny = nrm.getY(k);
+    const slope = Math.acos(Math.min(1, ny));
+    tmp.copy(cSnow).lerp(cSteep, Math.min(1, slope / 0.9) * 0.85);
+    if (t > 0.5 && Math.abs(ha[k] - hb[k]) > 0.05) tmp.lerp(cGroom, 0.55 * t);
+    // simple lambert-ish shading baked in
+    const shade = 0.72 + 0.28 * ny;
+    colors[k*3] = tmp.r * shade; colors[k*3+1] = tmp.g * shade; colors[k*3+2] = tmp.b * shade;
+  }
+  geo.attributes.color.needsUpdate = true;
+}
+paintTerrain(1);
+const terrain = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+scene.add(terrain);
+
+// ---------- piste lines ----------
+const lineGroup = new THREE.Group(); scene.add(lineGroup);
+const lineObjs = [];
+for (const r of runs) {
+  const g = new THREE.BufferGeometry();
+  const p = new Float32Array(r.points.length * 3);
+  g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+  const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color: r.color }));
+  line.userData.points = r.points; lineGroup.add(line); lineObjs.push(line);
+}
+function drapeLines(t) {
+  for (const line of lineObjs) {
+    const p = line.geometry.attributes.position, pts = line.userData.points;
+    for (let i = 0; i < pts.length; i++)
+      p.setXYZ(i, pts[i][0], mixH(pts[i][0], pts[i][1], t) + 2, pts[i][1]);
+    p.needsUpdate = true;
+  }
+}
+drapeLines(1);
+
+// ---------- morph ----------
+let morphT = 1, morphAnim = null;
+function setMorph(t) {
+  morphT = t; $('morph').value = Math.round(t * 100);
+  paintTerrain(t); drapeLines(t);
+}
+$('morph').addEventListener('input', e => { stopFly(); setMorph(e.target.value / 100); });
+$('play').addEventListener('click', () => {
+  stopFly();
+  const from = morphT, to = from > 0.5 ? 0 : 1, t0 = performance.now();
+  cancelAnimationFrame(morphAnim);
+  const stepFn = now => {
+    const k = Math.min(1, (now - t0) / 1600), e = k*k*(3-2*k);
+    setMorph(from + (to - from) * e);
+    if (k < 1) morphAnim = requestAnimationFrame(stepFn);
+  };
+  morphAnim = requestAnimationFrame(stepFn);
+});
+
+// ---------- fly mode ----------
+let fly = null;
+function stopFly() { fly = null; $('fly').classList.remove('active'); controls.enabled = true; }
+$('fly').addEventListener('click', () => {
+  if (fly) return stopFly();
+  const r = runs.find(r => r.name === meta.flyRun) || runs[0];
+  let pts = r.points.map(([x, z]) => new THREE.Vector3(x, 0, z));
+  // ensure top -> bottom
+  if (mixH(pts[0].x, pts[0].z, morphT) < mixH(pts[pts.length-1].x, pts[pts.length-1].z, morphT)) pts.reverse();
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i-1] + pts[i].distanceTo(pts[i-1]));
+  fly = { pts, cum, total: cum[cum.length-1], d: 0 };
+  $('fly').classList.add('active'); controls.enabled = false;
+});
+$('reset').addEventListener('click', () => { stopFly(); camera.position.copy(CAM0); controls.target.set(300, 2000, 200); });
+
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (fly) {
+    fly.d += dt * 22; // ~22 m/s
+    if (fly.d >= fly.total) fly.d = 0;
+    const { pts, cum } = fly;
+    let i = 1; while (cum[i] < fly.d) i++;
+    const t = (fly.d - cum[i-1]) / Math.max(1e-6, cum[i] - cum[i-1]);
+    const p = pts[i-1].clone().lerp(pts[i], t);
+    const ahead = pts[Math.min(pts.length-1, i+6)];
+    p.y = mixH(p.x, p.z, morphT) + 5;
+    camera.position.copy(p);
+    camera.lookAt(ahead.x, mixH(ahead.x, ahead.z, morphT) + 3, ahead.z);
+  } else controls.update();
+  renderer.render(scene, camera);
+}
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+$('loading').style.display = 'none'; $('panel').style.display = 'block'; $('hint').style.display = 'block';
+animate();
+</script>
+</body>
+</html>
